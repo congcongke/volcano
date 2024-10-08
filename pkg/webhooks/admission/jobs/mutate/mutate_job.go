@@ -24,6 +24,7 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	whv1 "k8s.io/api/admissionregistration/v1"
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 
 	"volcano.sh/apis/pkg/apis/batch/v1alpha1"
@@ -43,6 +44,10 @@ const (
 	DefaultMaxRetry = 3
 
 	defaultMaxRetry int32 = 3
+
+	DefaultLabelNamespaceInfo = "volcano.sh/namespace-info"
+	DefaultLabelJobInfo       = "volcano.sh/job-info"
+	DefaultLabelTaskInfo      = "volcano.sh/task-info"
 )
 
 func init() {
@@ -211,6 +216,10 @@ func mutateSpec(tasks []v1alpha1.TaskSpec, basePath string, job *v1alpha1.Job) *
 			patched = true
 			tasks[index].MaxRetry = defaultMaxRetry
 		}
+
+		if patchDefaultAffinityForTask(&tasks[index], job.Namespace, job.Name) {
+			patched = true
+		}
 	}
 	if !patched {
 		return nil
@@ -253,4 +262,46 @@ func patchDefaultPlugins(job *v1alpha1.Job) *patchOperation {
 		Path:  "/spec/plugins",
 		Value: plugins,
 	}
+}
+
+func patchDefaultAffinityForTask(task *v1alpha1.TaskSpec, namespace, jobName string) bool {
+	if task.Replicas <= 1 ||
+		(task.Template.Spec.Affinity != nil && task.Template.Spec.Affinity.PodAntiAffinity != nil) {
+		return false
+	}
+
+	affinityLabels := map[string]string{
+		DefaultLabelNamespaceInfo: namespace,
+		DefaultLabelJobInfo:       jobName,
+		DefaultLabelTaskInfo:      task.Name,
+	}
+
+	if task.Template.GetLabels() == nil {
+		task.Template.SetLabels(make(map[string]string))
+	}
+
+	for k, v := range affinityLabels {
+		task.Template.GetLabels()[k] = v
+	}
+
+	podAntiAffinity := v1.PodAntiAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: []v1.PodAffinityTerm{
+			{
+				LabelSelector: &metav1.LabelSelector{
+					MatchLabels: affinityLabels,
+				},
+				TopologyKey: "kubernetes.io/hostname",
+			},
+		},
+	}
+
+	if task.Template.Spec.Affinity == nil {
+		task.Template.Spec.Affinity = &v1.Affinity{
+			PodAntiAffinity: &podAntiAffinity,
+		}
+	} else {
+		task.Template.Spec.Affinity.PodAntiAffinity = &podAntiAffinity
+	}
+
+	return true
 }
